@@ -1,5 +1,6 @@
 import { Router } from "express";
 import fs from "fs/promises";
+import { requireAuth } from "./auth.js";
 
 const router = Router();
 const modelsPath = new URL("../../models.json", import.meta.url);
@@ -9,7 +10,8 @@ async function loadModels() {
   return JSON.parse(raw);
 }
 
-router.get("/free", async (req, res) => {
+// Require JWT authentication for model access
+router.get("/free", requireAuth, async (req, res) => {
   try {
     const data = await loadModels();
     const models = (data?.data || []).flatMap((model) => {

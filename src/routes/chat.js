@@ -1,4 +1,9 @@
 import { Router } from "express";
+import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
+import { fileURLToPath } from "url";
+
 import {
   addMessage,
   addImagePrompt,
@@ -13,8 +18,12 @@ import {
   getRecentImagePrompts,
   upsertMemory,
   upsertOutfit,
-  deleteChat
+  deleteChat,
+  deleteMessage,
+  deleteImagePrompt,
+  updateLatestImagePromptImageUrl
 } from "../db.js";
+import { requireAuth } from "./auth.js";
 
 const router = Router();
 
@@ -32,6 +41,24 @@ const outfitMaxTokens = Number(process.env.OUTFIT_MAX_TOKENS || 120);
 const outfitContextMessages = Number(process.env.OUTFIT_CONTEXT_MESSAGES || 12);
 const imagePromptStyleDefault =
   "A candid, photorealistic portrait photograph of";
+const pollinationsModelAllowlist = new Set([
+  "flux",
+  "zimage",
+  "flux-2-dev",
+  "imagen-4",
+  "grok-imagine",
+  "klein",
+  "klein-large",
+  "gptimage"
+]);
+
+function resolvePollinationsModel(model) {
+  if (typeof model !== "string") {
+    return "flux";
+  }
+  const trimmed = model.trim().toLowerCase();
+  return pollinationsModelAllowlist.has(trimmed) ? trimmed : "flux";
+}
 
 async function callHfChat(hfToken, hfModel, messages, maxTokens, temperature) {
   const controller = new AbortController();
@@ -182,8 +209,9 @@ async function maybeUpdateOutfit({ chatId, hfToken, hfModel }) {
   }
 }
 
-router.post("/", async (req, res) => {
-  const { message, model, chatId } = req.body || {};
+router.post("/", requireAuth, async (req, res) => {
+  const { message, model, chatId, persona: personaOverride } = req.body || {};
+  const user_id = req.user.user_id;
 
   if (!message || typeof message !== "string") {
     return res.status(400).json({ error: "message is required" });
@@ -195,11 +223,12 @@ router.post("/", async (req, res) => {
   }
 
   const hfModel = model || process.env.HF_MODEL || "Sao10K/L3-8B-Stheno-v3.2";
-  const resolvedChatId = getOrCreateChat(chatId);
+  const resolvedChatId = getOrCreateChat(chatId, user_id);
 
   addMessage(resolvedChatId, "user", message);
 
-  const persona = getCharacter(resolvedChatId);
+  // Use persona from request if provided, otherwise fetch from characterId
+  const persona = personaOverride || getCharacter(resolvedChatId);
   const memory = getMemory(resolvedChatId);
   const outfit = getOutfit(resolvedChatId);
   const recentMessages = getRecentMessages(resolvedChatId, maxMessages || 8);
@@ -249,8 +278,14 @@ router.post("/", async (req, res) => {
   }
 });
 
-router.post("/image-prompt", async (req, res) => {
-  const { chatId, model, style } = req.body || {};
+router.post("/image-prompt", requireAuth, async (req, res) => {
+  const { chatId, model, style, persona: requestPersona, outfit: requestOutfit } = req.body || {};
+  // Use special gallery chat if no chatId provided
+  const user_id = req.user.user_id;
+  let galleryChatId = chatId;
+  if (!galleryChatId && user_id) {
+    galleryChatId = `gallery_${user_id}`;
+  }
 
   const hfToken = process.env.HF_TOKEN;
   if (!hfToken) {
@@ -258,18 +293,24 @@ router.post("/image-prompt", async (req, res) => {
   }
 
   const hfModel = model || process.env.HF_MODEL || "Sao10K/L3-8B-Stheno-v3.2";
-  const resolvedChatId = getOrCreateChat(chatId);
+  const resolvedChatId = getOrCreateChat(galleryChatId, user_id);
 
-  const persona = getCharacter(resolvedChatId);
+  // Use persona from request if provided, otherwise from database
+  const persona = requestPersona || getCharacter(resolvedChatId);
   const memory = getMemory(resolvedChatId);
-  const recentMessages = getRecentMessages(resolvedChatId, maxMessages || 8);
+  // Use outfit from request if provided, otherwise from database
+  const outfit = requestOutfit || getOutfit(resolvedChatId);
+  const recentMessages = getRecentMessages(resolvedChatId, 4);
   const recentPrompts = getRecentImagePrompts(resolvedChatId, 3);
 
   const imageStyle = typeof style === "string" && style.trim() ? style.trim() : imagePromptStyleDefault;
   let instruction =
     "Create a single, concise image prompt for a realistic photo. " +
-    "Include physical characteristics, setting, pose, clothing, mood, and a specific activity or situation. " +
-    "Be concrete about the environment, body language, and what is happening in the scene. " +
+    "IMPORTANT: Focus primarily on depicting the main character/persona as described. " +
+    "Always emphasize and describe the subject's body shape, posture, and physical features in detail. " +
+    "Include their physical characteristics, clothing, pose, mood, and what they are doing or expressing. " +
+    "Be concrete about their appearance, body language, and expression. " +
+    "CONTENT GUIDELINE: The character can be naked or topless, but her private vaginal area must always be covered, hidden, or not shown. Do not include any explicit or exposed vaginal imagery. " +
     "Return only the prompt text. Begin with: " +
     imageStyle +
     ". End with: shot on professional camera, 85mm lens, shallow depth of field, sharp realistic eyes with natural catchlights, detailed skin, natural indoor lighting, raw photography style.";
@@ -296,21 +337,73 @@ router.post("/image-prompt", async (req, res) => {
   if (memory?.summary) {
     messages.push({ role: "system", content: `Memory summary: ${memory.summary}` });
   }
+  if (outfit) {
+    messages.push({ role: "system", content: `Current outfit: ${outfit}` });
+  }
   messages.push(...recentMessages);
-  messages.push({ role: "system", content: instruction });
+  messages.push({ role: "user", content: instruction + "\nPlease generate the image prompt now. Do not repeat these instructions; return only the prompt text." });
 
   try {
-    const data = await callHfChat(hfToken, hfModel, messages, 320, 0.6);
-    const prompt = data?.choices?.[0]?.message?.content?.trim();
-
-    if (!prompt) {
-      console.error("Missing content in HF response. Full data:", data);
-      return res.status(502).json({ error: "Unexpected Hugging Face response" });
+    // Generate image using Pollinations API if selected, otherwise Hugging Face
+    const imageApi = req.body?.imageApi || "pollinations";
+    const resolvedPollinationsModel = resolvePollinationsModel(req.body?.pollinationsModel);
+    let responseModel = hfModel;
+    let prompt = null;
+    let imageUrl = null;
+    if (imageApi === "pollinations") {
+      responseModel = resolvedPollinationsModel;
+      // console.log("[ImageGen] Using Pollinations API"); // Debug only
+      // Step 1: Generate image prompt
+      // console.log("[ImageGen] Generating prompt..."); // Debug only
+      const data = await callHfChat(hfToken, hfModel, messages, 320, 0.6);
+      prompt = data?.choices?.[0]?.message?.content?.trim();
+      if (!prompt || prompt === "(No prompt returned)") {
+        console.error("[ImageGen] No valid prompt returned");
+        return res.status(502).json({ error: "No valid prompt returned from AI" });
+      }
+      addImagePrompt(resolvedChatId, prompt);
+      // Step 2: Send prompt to Pollinations
+      // console.log("[ImageGen] Sending prompt to Pollinations..."); // Debug only
+      try {
+        const pollinationsApiKey = process.env.POLLINATIONS_API_KEY;
+        const pollinationsHeaders = pollinationsApiKey ? { Authorization: `Bearer ${pollinationsApiKey}` } : {};
+        const pollinationsUrl = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=${encodeURIComponent(resolvedPollinationsModel)}`;
+        const pollinationsResponse = await fetch(pollinationsUrl, { headers: pollinationsHeaders });
+        const contentType = pollinationsResponse.headers.get("content-type");
+        if (contentType && contentType.startsWith("image")) {
+          const arrayBuffer = await pollinationsResponse.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          const extension = contentType.includes("jpeg") ? "jpg" : contentType.includes("png") ? "png" : "png";
+          const __dirname = path.dirname(fileURLToPath(import.meta.url));
+          const generationsDir = path.join(__dirname, "..", "..", "images", "generations");
+          await fs.mkdir(generationsDir, { recursive: true });
+          const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${extension}`;
+          const filePath = path.join(generationsDir, fileName);
+          await fs.writeFile(filePath, buffer);
+          imageUrl = `/images/generations/${fileName}`;
+          updateLatestImagePromptImageUrl(resolvedChatId, imageUrl);
+        } else {
+          const text = await pollinationsResponse.text();
+          // console.log("[ImageGen] Pollinations returned non-image response"); // Debug only
+          imageUrl = pollinationsUrl;
+          updateLatestImagePromptImageUrl(resolvedChatId, imageUrl);
+        }
+      } catch (err) {
+        console.error("[ImageGen] Pollinations error", err);
+      }
+    } else {
+      // console.log("[ImageGen] Using Hugging Face API"); // Debug only
+      // Hugging Face image generation
+      // console.log("[ImageGen] Generating prompt (HF)..."); // Debug only
+      const data = await callHfChat(hfToken, hfModel, messages, 320, 0.6);
+      prompt = data?.choices?.[0]?.message?.content?.trim();
+      if (!prompt || prompt === "(No prompt returned)") {
+        console.error("[ImageGen] No valid prompt returned");
+        return res.status(502).json({ error: "No valid prompt returned from AI" });
+      }
+      addImagePrompt(resolvedChatId, prompt);
     }
-
-    addImagePrompt(resolvedChatId, prompt);
-
-    return res.json({ prompt, model: hfModel, chatId: resolvedChatId });
+    return res.json({ prompt, model: responseModel, chatId: resolvedChatId, imageUrl });
   } catch (error) {
     if (error?.name === "AbortError") {
       return res.status(504).json({ error: "Upstream timeout" });
@@ -347,6 +440,23 @@ router.post("/delete", (req, res) => {
     return res.json({ ok: true });
   } catch (error) {
     return res.status(500).json({ error: error.message || "Failed to delete chat" });
+  }
+});
+
+router.post("/message/delete", (req, res) => {
+  const { messageId, kind } = req.body || {};
+  if (!messageId) {
+    return res.status(400).json({ error: "messageId is required" });
+  }
+  try {
+    if (kind === "image_prompt") {
+      deleteImagePrompt(messageId);
+    } else {
+      deleteMessage(messageId);
+    }
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || "Failed to delete message" });
   }
 });
 

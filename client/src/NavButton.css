@@ -1,0 +1,52 @@
+/* Vertical Nav Container */
+.nav-vertical {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 18px;
+}
+
+/* Nav Button */
+.nav-item {
+    background: transparent;
+    border: none;
+    color: #9aa5a5;
+    text-align: left;
+    padding: 12px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease, transform 0.15s ease;
+}
+
+/* Hover State */
+.nav-item:hover {
+  background: #182828;
+  color: #fff;
+}
+
+/* Active State */
+.nav-item.active {
+  background: linear-gradient(135deg, #f5c26b, #ffcc66);
+  color: #0f1a1a;
+  font-weight: 600;
+  position: relative;
+}
+
+.nav-item.active::before {
+  display: none;
+}
+
+/* New button style (matches active) */
+.nav-item:last-child {
+  background: linear-gradient(135deg, #f5c26b, #ffcc66);
+  padding: 12px 14px;
+  color: #0f1a1a;
+  font-weight: 600;
+  border-radius: 16px;
+  margin-top: 32px;
+  text-align: center;
+  font-size: 1.1rem;
+}
