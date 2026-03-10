@@ -326,6 +326,28 @@ button.warning {
   pointer-events: auto;
 }
 
+.media-viewer-info {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  padding: 8px 12px;
+  background: transparent;
+  color: #f5c26b;
+  border: none;
+  cursor: pointer;
+  font-size: 32px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.media-viewer-modal img:hover ~ .media-viewer-info,
+.media-viewer-info:hover {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* Delete Chat Button */
 .delete-chat-btn {
   padding: 6px 8px;
@@ -878,6 +900,26 @@ body {
   align-items: stretch;
 }
 
+.composer-controls {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+}
+
+.composer-controls .composer-model-select {
+  flex: 1;
+}
+
+.composer-controls .settings-button {
+  flex: 0 0 auto;
+}
+
+.composer-actions button[type="submit"] {
+  flex: 0 1 auto;
+  min-width: 150px;
+}
+
 .composer-model-select {
   padding: 8px;
   font-size: 1em;
@@ -885,7 +927,6 @@ body {
   border: 1px solid #b6b6a8;
   background: #232323;
   color: #f5c26b;
-  min-width: 180px;
 }
 .field {
   display: flex;

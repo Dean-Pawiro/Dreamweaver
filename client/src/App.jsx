@@ -113,7 +113,35 @@ function App() {
       return null;
     }
   });
+
   const [showAccount, setShowAccount] = useState(false);
+
+  // Auto-refresh token on page load
+  useEffect(() => {
+    if (!session?.token) return;
+
+    (async () => {
+      try {
+        const res = await fetch("/api/refresh", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${session.token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setSession(data);
+          localStorage.setItem("session", JSON.stringify(data));
+        } else if (res.status === 401) {
+          // Token expired, clear session
+          setSession(null);
+          localStorage.removeItem("session");
+        }
+      } catch (err) {
+        console.error("Token refresh failed:", err);
+      }
+    })();
+  }, []);
+
+
   // Login handler
   const [pendingLogin, setPendingLogin] = useState(null);
   const handleLogin = (data) => {

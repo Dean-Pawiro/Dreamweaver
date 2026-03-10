@@ -17,6 +17,8 @@ const pollinationsModelAllowlist = new Set([
   "klein-large",
   "gptimage"
 ]);
+const i2iPollinationsModelAllowlist = new Set(["flux-2-dev", "klein", "klein-large", "gptimage"]);
+const videoPollinationsModelAllowlist = new Set(["grok-video"]);
 
 function resolvePollinationsModel(model) {
   if (typeof model !== "string") {
@@ -24,6 +26,22 @@ function resolvePollinationsModel(model) {
   }
   const trimmed = model.trim().toLowerCase();
   return pollinationsModelAllowlist.has(trimmed) ? trimmed : "flux";
+}
+
+function resolveI2IPollinationsModel(model) {
+  if (typeof model !== "string") {
+    return "flux-2-dev";
+  }
+  const trimmed = model.trim().toLowerCase();
+  return i2iPollinationsModelAllowlist.has(trimmed) ? trimmed : "flux-2-dev";
+}
+
+function resolveVideoPollinationsModel(model) {
+  if (typeof model !== "string") {
+    return "grok-video";
+  }
+  const trimmed = model.trim().toLowerCase();
+  return videoPollinationsModelAllowlist.has(trimmed) ? trimmed : "grok-video";
 }
 
 // Pollinations balance endpoint (backend proxy)
@@ -76,9 +94,18 @@ router.post("/gallery/generate", requireAuth, async (req, res) => {
   try {
     const db = getDb();
     const user_id = req.user.user_id;
-    const { prompt, pollinationsModel, aspectRatio } = req.body || {};
+    const { prompt, pollinationsModel, aspectRatio, imageMode, sourceImageUrl, seed } = req.body || {};
     if (!prompt || typeof prompt !== "string") {
       return res.status(400).json({ error: "prompt is required" });
+    }
+    const resolvedImageMode = ["t2i", "i2i", "t2v", "i2v"].includes(imageMode) ? imageMode : "t2i";
+    const isImageToImage = resolvedImageMode === "i2i";
+    const isTextToVideo = resolvedImageMode === "t2v";
+    const isImageToVideo = resolvedImageMode === "i2v";
+    const isVideoMode = isTextToVideo || isImageToVideo;
+    const needsSourceImage = isImageToImage || isImageToVideo;
+    if (needsSourceImage && (!sourceImageUrl || typeof sourceImageUrl !== "string" || !sourceImageUrl.trim())) {
+      return res.status(400).json({ error: "sourceImageUrl is required for this mode" });
     }
     // Use special gallery chat
     const galleryChatId = `gallery_${user_id}`;
@@ -88,27 +115,53 @@ router.post("/gallery/generate", requireAuth, async (req, res) => {
     if (!apiKey) {
       return res.status(500).json({ error: "POLLINATIONS_API_KEY is not set" });
     }
-    const resolvedModel = resolvePollinationsModel(pollinationsModel);
+    const resolvedModel = isVideoMode
+      ? resolveVideoPollinationsModel(pollinationsModel)
+      : isImageToImage
+        ? resolveI2IPollinationsModel(pollinationsModel)
+        : resolvePollinationsModel(pollinationsModel);
+
     // Send prompt directly to Pollinations
-    const payload = await callPollinationsImages({ prompt, apiKey, model: resolvedModel, aspectRatio });
-    const imageUrl = await saveImageToDisk({ chatId: galleryChatId, payload });
+    const payload = isVideoMode
+      ? await callPollinationsVideos({
+          prompt,
+          apiKey,
+          model: resolvedModel,
+          aspectRatio: aspectRatio || "16:9",
+          duration: 10,
+          audio: true,
+          sourceImageUrl: isImageToVideo ? sourceImageUrl.trim() : "",
+          seed: seed || null
+        })
+      : await callPollinationsImages({
+          prompt,
+          apiKey,
+          model: resolvedModel,
+          aspectRatio: isImageToImage ? "1:1" : aspectRatio,
+          useAspectRatio: !isImageToImage,
+          sourceImageUrl: isImageToImage ? sourceImageUrl.trim() : "",
+          seed: seed || null
+        });
+    const imageUrl = await saveImageToDisk({ chatId: galleryChatId, payload, imageMode: resolvedImageMode });
     if (!imageUrl) {
       return res.status(502).json({ error: "Unexpected image response" });
     }
-    // Save prompt and image
-    addImagePrompt(galleryChatId, prompt, imageUrl);
-    return res.json({ imageUrl, model: resolvedModel, chatId: galleryChatId });
+    // Save prompt and image with seed and model
+    addImagePrompt(galleryChatId, prompt, imageUrl, resolvedImageMode, seed || null, resolvedModel);
+    return res.json({ imageUrl, model: resolvedModel, chatId: galleryChatId, imageMode: resolvedImageMode, seed });
   } catch (error) {
     return res.status(500).json({ error: error?.message || "Request failed" });
   }
 });
-// ...existing code...
 
 // Gallery endpoint: returns images from generations directory
 router.get("/gallery", requireAuth, async (req, res) => {
   try {
     const db = getDb();
     const user_id = req.user.user_id;
+    const requestedImageMode = ["t2i", "i2i", "t2v", "i2v"].includes(req.query.imageMode)
+      ? req.query.imageMode
+      : "t2i";
 
     // Get master user id
     const masterUser = db.prepare("SELECT user_id FROM users WHERE username = ?").get("master");
@@ -116,36 +169,32 @@ router.get("/gallery", requireAuth, async (req, res) => {
     if (masterUser && user_id === masterUser.user_id) {
       // Master sees all images, including those without a chat_id
       rows = db.prepare(`
-        SELECT ip.chat_id, ip.image_url FROM image_prompts ip
-        WHERE ip.image_url IS NOT NULL
+        SELECT ip.chat_id, ip.image_url, ip.image_mode, ip.prompt, ip.seed, ip.model FROM image_prompts ip
+        WHERE ip.image_url IS NOT NULL AND COALESCE(ip.image_mode, 't2i') = ?
         ORDER BY ip.id DESC LIMIT 100
-      `).all();
+      `).all(requestedImageMode);
     } else {
       // Only images from chats owned by this user (must have a chat_id and not deleted)
       rows = db.prepare(`
-        SELECT ip.chat_id, ip.image_url FROM image_prompts ip
+        SELECT ip.chat_id, ip.image_url, ip.image_mode, ip.prompt, ip.seed, ip.model FROM image_prompts ip
         JOIN chats c ON ip.chat_id = c.id
-        WHERE ip.image_url IS NOT NULL AND c.user_id = ? AND ip.chat_id != 'deleted'
+        WHERE ip.image_url IS NOT NULL AND c.user_id = ? AND ip.chat_id != 'deleted' AND COALESCE(ip.image_mode, 't2i') = ?
         ORDER BY ip.id DESC LIMIT 100
-      `).all(user_id);
+      `).all(user_id, requestedImageMode);
     }
-    // Only include images that exist on disk
-    const generationsDir = path.join(__dirname, "..", "..", "images", "generations");
-    const files = await fs.readdir(generationsDir);
-    const fileSet = new Set(files);
-    const images = rows
-      .filter(row => {
-        const fname = row.image_url.split("/").pop();
-        return fileSet.has(fname);
-      })
-      .map(row => ({ url: row.image_url, chatId: row.chat_id }));
+    // Only include files that still exist on disk
+    const rowsWithExistence = await Promise.all(
+      rows.map(async (row) => ({ ...row, existsOnDisk: await mediaUrlExists(row.image_url) }))
+    );
+    const images = rowsWithExistence
+      .filter((row) => row.existsOnDisk)
+      .map(row => ({ url: row.image_url, chatId: row.chat_id, imageMode: row.image_mode || "t2i", prompt: row.prompt, seed: row.seed, model: row.model }));
     return res.json({ images });
   } catch (e) {
     return res.status(500).json({ error: "Failed to load gallery" });
   }
 });
 
-const endpoint = "https://openrouter.ai/api/v1/chat/completions";
 const timeoutMs = Number(process.env.IMAGE_TIMEOUT_MS || 120000);
 const aspectRatio = process.env.OPENROUTER_IMAGE_ASPECT_RATIO || "1:1";
 const imageSize = process.env.OPENROUTER_IMAGE_SIZE || "1K";
@@ -156,7 +205,34 @@ const modalities = (process.env.OPENROUTER_IMAGE_MODALITIES || "image")
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const imagesRoot = process.env.IMAGES_DIR || path.join(__dirname, "..", "..", "images");
+
+function getDreamsRoot() {
+  return process.env.DREAMS_DIR || process.env.IMAGES_DIR || path.join(__dirname, "..", "..", "dreams");
+}
+
+async function mediaUrlExists(mediaUrl) {
+  if (!mediaUrl || typeof mediaUrl !== "string") {
+    return false;
+  }
+
+  let relativePath = null;
+  if (mediaUrl.startsWith("/dreams/")) {
+    relativePath = mediaUrl.replace(/^\/dreams\//, "");
+  } else if (mediaUrl.startsWith("/images/")) {
+    // Legacy URLs are mapped to the same dreams root for backward compatibility.
+    relativePath = mediaUrl.replace(/^\/images\//, "");
+  } else {
+    return true;
+  }
+
+  const absolutePath = path.join(getDreamsRoot(), relativePath);
+  try {
+    await fs.access(absolutePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Add Pollinations API key to env
 // Pollinations API key should be set in .env
@@ -214,7 +290,7 @@ async function callOpenRouterImages({ prompt, model, aspectRatio, imageSize, mod
   return data;
 }
 
-async function callPollinationsImages({ prompt, apiKey, model = "flux", aspectRatio = "1:1" }) {
+async function callPollinationsImages({ prompt, apiKey, model = "flux", aspectRatio = "1:1", useAspectRatio = true, sourceImageUrl = "", seed = null }) {
   const resolvedModel = resolvePollinationsModel(model);
   
   // Convert aspect ratio to width/height (max dimension: 1024)
@@ -241,7 +317,29 @@ async function callPollinationsImages({ prompt, apiKey, model = "flux", aspectRa
     height = Math.round(baseSize / aspectValue);
   }
   
-  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=${encodeURIComponent(resolvedModel)}&width=${width}&height=${height}&quality=hd&enhance=true`;
+  const params = new URLSearchParams({
+    model: resolvedModel,
+    quality: "hd",
+    enhance: "true"
+  });
+
+  if (useAspectRatio) {
+    params.set("width", String(width));
+    params.set("height", String(height));
+  }
+
+  if (typeof sourceImageUrl === "string" && sourceImageUrl.trim()) {
+    params.set("image", sourceImageUrl.trim());
+  }
+
+  if (seed) {
+    const numericSeed = typeof seed === "string" ? parseInt(seed, 10) : seed;
+    if (!isNaN(numericSeed)) {
+      params.set("seed", String(numericSeed));
+    }
+  }
+
+  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?${params.toString()}`;
   const headers = {
     Authorization: `Bearer ${apiKey}`
   };
@@ -253,7 +351,51 @@ async function callPollinationsImages({ prompt, apiKey, model = "flux", aspectRa
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   const base64 = buffer.toString("base64");
-  return { url: null, base64 };
+  return { url: null, base64, extension: "png" };
+}
+
+async function callPollinationsVideos({
+  prompt,
+  apiKey,
+  model = "grok-video",
+  aspectRatio = "16:9",
+  duration = 10,
+  audio = true,
+  sourceImageUrl = "",
+  seed = null
+}) {
+  const resolvedModel = resolveVideoPollinationsModel(model);
+  const params = new URLSearchParams({
+    model: resolvedModel,
+    duration: String(duration),
+    aspectRatio,
+    audio: audio ? "true" : "false"
+  });
+
+  if (typeof sourceImageUrl === "string" && sourceImageUrl.trim()) {
+    params.set("image", sourceImageUrl.trim());
+  }
+
+  if (seed) {
+    const numericSeed = typeof seed === "string" ? parseInt(seed, 10) : seed;
+    if (!isNaN(numericSeed)) {
+      params.set("seed", String(numericSeed));
+    }
+  }
+
+  const url = `https://gen.pollinations.ai/video/${encodeURIComponent(prompt)}?${params.toString()}`;
+  const headers = {
+    Authorization: `Bearer ${apiKey}`
+  };
+  const response = await fetch(url, { method: "GET", headers });
+  if (!response.ok) {
+    throw new Error(`Pollinations video generation error: ${await response.text()}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  const base64 = buffer.toString("base64");
+  return { url: null, base64, extension: "mp4" };
 }
 
 function extractImagePayload(data) {
@@ -281,6 +423,12 @@ function extensionFromContentType(contentType) {
   if (safeType.includes("image/png")) {
     return "png";
   }
+  if (safeType.includes("video/mp4")) {
+    return "mp4";
+  }
+  if (safeType.includes("video/webm")) {
+    return "webm";
+  }
   return "png";
 }
 
@@ -298,12 +446,13 @@ function decodeDataUrl(dataUrl) {
   };
 }
 
-async function saveImageToDisk({ chatId, payload }) {
-  const generationsDir = path.join(__dirname, "..", "..", "images", "generations");
+async function saveImageToDisk({ chatId, payload, imageMode = "t2i" }) {
+  const resolvedImageMode = ["t2i", "i2i", "t2v", "i2v", "t2s"].includes(imageMode) ? imageMode : "t2i";
+  const generationsDir = path.join(getDreamsRoot(), "generations", resolvedImageMode);
   await fs.mkdir(generationsDir, { recursive: true });
 
   let buffer = null;
-  let extension = "png";
+  let extension = payload.extension || "png";
 
   if (payload.base64) {
     buffer = Buffer.from(payload.base64, "base64");
@@ -331,7 +480,7 @@ async function saveImageToDisk({ chatId, payload }) {
   const filePath = path.join(generationsDir, fileName);
   await fs.writeFile(filePath, buffer);
 
-  return `/images/generations/${fileName}`;
+  return `/dreams/generations/${resolvedImageMode}/${fileName}`;
 }
 
 router.post("/generate", async (req, res) => {
@@ -354,7 +503,7 @@ router.post("/generate", async (req, res) => {
       }
       const resolvedModel = resolvePollinationsModel(pollinationsModel);
       const payload = await callPollinationsImages({ prompt, apiKey, model: resolvedModel, aspectRatio });
-      imageUrl = await saveImageToDisk({ chatId, payload });
+      imageUrl = await saveImageToDisk({ chatId, payload, imageMode: "t2i" });
       if (!imageUrl) {
         return res.status(502).json({ error: "Unexpected image response" });
       }
@@ -380,7 +529,7 @@ router.post("/generate", async (req, res) => {
       apiKey
     });
     const imagePayload = extractImagePayload(payload);
-    imageUrl = await saveImageToDisk({ chatId, payload: imagePayload });
+    imageUrl = await saveImageToDisk({ chatId, payload: imagePayload, imageMode: "t2i" });
     if (!imageUrl) {
       return res.status(502).json({ error: "Unexpected image response" });
     }

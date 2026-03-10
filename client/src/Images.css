@@ -44,6 +44,56 @@
   margin-top: 0;
   color: #f5c26b;
 }
+
+.image-mode-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.image-mode-tab {
+  border: 1px solid #384848;
+  background: #162222;
+  color: #d4dddd;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.image-mode-tab:hover {
+  background: #1e2d2d;
+  color: #fff;
+}
+
+.image-mode-tab.active {
+  background: linear-gradient(135deg, #f5c26b, #ffcc66);
+  color: #0f1a1a;
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.i2i-placeholder-composer {
+  border: 1px solid #2f3a3a;
+  border-radius: 12px;
+}
+
+.i2i-source-url-input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #384848;
+  background: #121a1a;
+  color: #e7efef;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+}
+
+.i2i-source-url-input:focus {
+  outline: none;
+  border-color: #f5c26b;
+  box-shadow: 0 0 0 2px #f5c26b33;
+}
 .image-prompt-form {
   display: flex;
   gap: 0.5rem;
@@ -91,7 +141,82 @@
   max-width: 100%;
   max-height: 120px;
 }
+.gallery-img.loading-placeholder {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
 .empty {
   color: #aaa;
   font-style: italic;
+}
+
+.settings-button {
+  padding: 0;
+  width: 36px;
+  height: 36px;
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+}
+
+.settings-button:hover:not(:disabled) {
+  background: rgba(245,194,107,0.2);
+  border-color: rgba(245,194,107,0.5);
+}
+
+.settings-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.settings-modal {
+  background: #1e2228;
+  border: 1px solid rgba(245,194,107,0.3);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+
+.settings-close {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 28px;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: color 0.2s;
+}
+
+.settings-close:hover {
+  color: #f5c26b;
 }

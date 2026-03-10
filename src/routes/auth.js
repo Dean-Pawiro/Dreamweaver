@@ -102,6 +102,12 @@ router.post("/login", (req, res) => {
 });
 
 // Logout is a no-op with JWT (handled client-side)
+// Refresh token endpoint - re-issues a new token
+router.post("/refresh", requireAuth, (req, res) => {
+  const newToken = signJwt({ user_id: req.user.user_id, username: req.user.username });
+  return res.json({ token: newToken, user_id: req.user.user_id, username: req.user.username });
+});
+
 router.post("/logout", (req, res) => {
   return res.json({ success: true });
 });
